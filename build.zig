@@ -14,6 +14,15 @@ pub fn build(b: *std.Build) void {
 
     exe_mod.addImport("wgpu", wgpu_native_dep.module("wgpu"));
 
+    const zglfw_dep = b.dependency("zglfw", .{
+        .target = target,
+        .optimize = optimize,
+        .x11 = false,
+    });
+
+    exe_mod.addImport("glfw", zglfw_dep.module("root"));
+    exe_mod.linkLibrary(zglfw_dep.artifact("glfw"));
+
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
     // rather than a static library.
     const exe = b.addExecutable(.{

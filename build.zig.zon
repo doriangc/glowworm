@@ -8,6 +8,10 @@
             .url = "https://github.com/bronter/wgpu_native_zig/archive/refs/tags/v6.5.0.tar.gz",
             .hash = "wgpu_native_zig-6.5.0-B9jeDFtzAwB1vPOiXTd2BqrP1j4phYk-oBbxbpLKY3xD",
         },
+        .zglfw = .{
+            .url = "https://github.com/zig-gamedev/zglfw/archive/f04fdbfc5b6d8c9a12025013992ac1d48653931e.tar.gz",
+            .hash = "zglfw-0.10.0-dev-zgVDNNu5IQAk-UK7gIg0LWMmMzxj4sK9xCSTisLhjgI1",
+        },
     },
     .paths = .{
         "build.zig",

@@ -1,74 +1,64 @@
 const std = @import("std");
 const wgpu = @import("wgpu");
-const bmp = @import("./bmp.zig");
+const glfw = @import("glfw");
 
-const output_extent = wgpu.Extent3D{
-    .width = 640,
-    .height = 480,
-    .depth_or_array_layers = 1,
-};
-const output_bytes_per_row = 4 * output_extent.width;
-const output_size = output_bytes_per_row * output_extent.height;
+const window_width = 640;
+const window_height = 480;
 
-fn handleBufferMap(status: wgpu.MapAsyncStatus, _: wgpu.StringView, userdata1: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {
-    std.log.info("buffer_map status={x:.8}\n", .{@intFromEnum(status)});
-    const complete: *bool = @ptrCast(@alignCast(userdata1));
-    complete.* = true;
-}
+// What the headless version rendered into. A surface only accepts formats the
+// adapter and compositor agree on, so this is a preference rather than a given.
+const preferred_format = wgpu.TextureFormat.bgra8_unorm_srgb;
 
 // Based off of headless triangle example from https://github.com/eliemichel/LearnWebGPU-Code/tree/step030-headless
 
 pub fn main() !void {
+    try glfw.init();
+    defer glfw.terminate();
+
+    // wgpu owns the swap chain, so GLFW must not make an OpenGL context for us.
+    glfw.windowHint(.client_api, .no_api);
+
+    const window = try glfw.Window.create(window_width, window_height, "glowworm", null, null);
+    defer window.destroy();
+
     const instance = wgpu.Instance.create(null).?;
     defer instance.release();
 
-    const adapter_request = instance.requestAdapterSync(&wgpu.RequestAdapterOptions{}, 0);
-    const adapter = switch (adapter_request.status) {
-        .success => adapter_request.adapter.?,
-        else => return error.NoAdapter,
-    };
+    const surface = try createWaylandSurface(instance, window);
+    defer surface.release();
+
+    const adapter_request = instance.requestAdapterSync(&wgpu.RequestAdapterOptions{
+        .compatible_surface = surface,
+    }, 0);
+
+    if (adapter_request.status != .success) return error.NoAdapter;
+    const adapter = adapter_request.adapter orelse return error.NoAdapter;
     defer adapter.release();
 
     const device_request = adapter.requestDeviceSync(instance, &wgpu.DeviceDescriptor{
         .required_limits = null,
     }, 0);
-    const device = switch (device_request.status) {
-        .success => device_request.device.?,
-        else => return error.NoDevice,
-    };
+
+    if (adapter_request.status != .success) return error.NoAdapter;
+
+    const device = device_request.device orelse return error.NoAdapter;
     defer device.release();
 
     const queue = device.getQueue().?;
     defer queue.release();
 
-    const swap_chain_format = wgpu.TextureFormat.bgra8_unorm_srgb;
+    var capabilities: wgpu.SurfaceCapabilities = undefined;
+    if (surface.getCapabilities(adapter, &capabilities) != .success) {
+        return error.NoSurfaceCapabilities;
+    }
+    defer capabilities.freeMembers();
 
-    const target_texture = device.createTexture(&wgpu.TextureDescriptor{
-        .label = wgpu.StringView.fromSlice("Render texture"),
-        .size = output_extent,
-        .format = swap_chain_format,
-        .usage = wgpu.TextureUsages.render_attachment | wgpu.TextureUsages.copy_src,
-    }).?;
-    defer target_texture.release();
-
-    const target_texture_view = target_texture.createView(&wgpu.TextureViewDescriptor{
-        .label = wgpu.StringView.fromSlice("Render texture view"),
-        .mip_level_count = 1,
-        .array_layer_count = 1,
-    }).?;
+    const swap_chain_format = pickFormat(capabilities);
 
     const shader_module = device.createShaderModule(&wgpu.shaderModuleWGSLDescriptor(.{
         .code = @embedFile("./shader.wgsl"),
     })).?;
     defer shader_module.release();
-
-    const staging_buffer = device.createBuffer(&wgpu.BufferDescriptor{
-        .label = wgpu.StringView.fromSlice("staging_buffer"),
-        .usage = wgpu.BufferUsages.map_read | wgpu.BufferUsages.copy_dst,
-        .size = output_size,
-        .mapped_at_creation = @as(u32, @intFromBool(false)),
-    }).?;
-    defer staging_buffer.release();
 
     const color_targets = &[_]wgpu.ColorTargetState{
         wgpu.ColorTargetState{
@@ -99,8 +89,54 @@ pub fn main() !void {
     }).?;
     defer pipeline.release();
 
-    { // Mock main "loop"
-        const next_texture = target_texture_view;
+    var config = wgpu.SurfaceConfiguration{
+        .device = device,
+        .format = swap_chain_format,
+        .width = window_width,
+        .height = window_height,
+        .alpha_mode = pickAlphaMode(capabilities),
+        // The only present mode guaranteed to be supported, and it vsyncs.
+        .present_mode = .fifo,
+    };
+    surface.configure(&config);
+    defer surface.unconfigure();
+
+    while (!window.shouldClose()) {
+        glfw.pollEvents();
+
+        // On Wayland the compositor decides how big we are, so the surface has to
+        // follow the framebuffer rather than the other way around.
+        const framebuffer_size = window.getFramebufferSize();
+        const width: u32 = @intCast(@max(framebuffer_size[0], 1));
+        const height: u32 = @intCast(@max(framebuffer_size[1], 1));
+        if (width != config.width or height != config.height) {
+            config.width = width;
+            config.height = height;
+            surface.configure(&config);
+        }
+
+        var surface_texture: wgpu.SurfaceTexture = undefined;
+        surface.getCurrentTexture(&surface_texture);
+        switch (surface_texture.status) {
+            .success_optimal, .success_suboptimal => {},
+            // Usually means we're mid-resize and the swap chain we were handed is
+            // already stale. Rebuild it and take the next frame instead.
+            .timeout, .outdated, .lost => {
+                if (surface_texture.texture) |stale| stale.release();
+                surface.configure(&config);
+                continue;
+            },
+            else => return error.NoSurfaceTexture,
+        }
+        const frame_texture = surface_texture.texture.?;
+        defer frame_texture.release();
+
+        const next_texture = frame_texture.createView(&wgpu.TextureViewDescriptor{
+            .label = wgpu.StringView.fromSlice("Frame texture view"),
+            .mip_level_count = 1,
+            .array_layer_count = 1,
+        }).?;
+        defer next_texture.release();
 
         const encoder = device.createCommandEncoder(&wgpu.CommandEncoderDescriptor{
             .label = wgpu.StringView.fromSlice("Command Encoder"),
@@ -124,44 +160,42 @@ pub fn main() !void {
         // https://github.com/gfx-rs/wgpu-native/issues/412#issuecomment-2311719154
         render_pass.release();
 
-        defer next_texture.release();
-
-        const img_copy_src = wgpu.TexelCopyTextureInfo{
-            .origin = wgpu.Origin3D{},
-            .texture = target_texture,
-        };
-        const img_copy_dst = wgpu.TexelCopyBufferInfo{
-            .layout = wgpu.TexelCopyBufferLayout{
-                .bytes_per_row = output_bytes_per_row,
-                .rows_per_image = output_extent.height,
-            },
-            .buffer = staging_buffer,
-        };
-
-        encoder.copyTextureToBuffer(&img_copy_src, &img_copy_dst, &output_extent);
-
         const command_buffer = encoder.finish(&wgpu.CommandBufferDescriptor{
             .label = wgpu.StringView.fromSlice("Command Buffer"),
         }).?;
         defer command_buffer.release();
 
         queue.submit(&[_]*const wgpu.CommandBuffer{command_buffer});
-
-        var buffer_map_complete = false;
-        _ = staging_buffer.mapAsync(wgpu.MapModes.read, 0, output_size, wgpu.BufferMapCallbackInfo{
-            .callback = handleBufferMap,
-            .userdata1 = @ptrCast(&buffer_map_complete),
-        });
-        instance.processEvents();
-        while (!buffer_map_complete) {
-            instance.processEvents();
-        }
-        // _ = device.poll(true, null);
-
-        const buf: [*]u8 = @ptrCast(@alignCast(staging_buffer.getMappedRange(0, output_size).?));
-        defer staging_buffer.unmap();
-
-        const output = buf[0..output_size];
-        try bmp.write24BitBMP("triangle.bmp", output_extent.width, output_extent.height, output);
+        _ = surface.present();
     }
+}
+
+fn createWaylandSurface(instance: *wgpu.Instance, window: *glfw.Window) !*wgpu.Surface {
+    if (glfw.getPlatform() != .wayland) return error.UnsupportedPlatform;
+
+    const source = wgpu.SurfaceSourceWaylandSurface{
+        .display = glfw.getWaylandDisplay() orelse return error.NoWaylandDisplay,
+        .surface = glfw.getWaylandWindow(window) orelse return error.NoWaylandWindow,
+    };
+    return instance.createSurface(&wgpu.SurfaceDescriptor{
+        .next_in_chain = @ptrCast(&source),
+        .label = wgpu.StringView.fromSlice("Window surface"),
+    }) orelse error.NoSurface;
+}
+
+fn pickFormat(capabilities: wgpu.SurfaceCapabilities) wgpu.TextureFormat {
+    const formats = capabilities.formats[0..capabilities.format_count];
+    for (formats) |format| {
+        if (format == preferred_format) return format;
+    }
+    // The list is in order of preference, so the first entry is the next best thing.
+    return if (formats.len > 0) formats[0] else preferred_format;
+}
+
+fn pickAlphaMode(capabilities: wgpu.SurfaceCapabilities) wgpu.CompositeAlphaMode {
+    const alpha_modes = capabilities.alpha_modes[0..capabilities.alpha_mode_count];
+    for (alpha_modes) |alpha_mode| {
+        if (alpha_mode == .@"opaque") return alpha_mode;
+    }
+    return .auto;
 }
