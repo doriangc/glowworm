@@ -9,6 +9,12 @@ const window_height = 480;
 // adapter and compositor agree on, so this is a preference rather than a given.
 const preferred_format = wgpu.TextureFormat.bgra8_unorm_srgb;
 
+const vertices = [_][2]f32{
+    .{ -0.5, -0.5 },
+    .{ 0.5, -0.5 },
+    .{ 0.0, 0.5 },
+};
+
 // Based off of headless triangle example from https://github.com/eliemichel/LearnWebGPU-Code/tree/step030-headless
 
 pub fn main() !void {
@@ -78,13 +84,43 @@ pub fn main() !void {
         },
     };
 
+    const vertex_buffer = device.createBuffer(&wgpu.BufferDescriptor{
+        .label = wgpu.StringView.fromSlice("Vertex buffer"),
+        .usage = wgpu.BufferUsages.vertex | wgpu.BufferUsages.copy_dst,
+        .size = @sizeOf(@TypeOf(vertices)),
+    }).?;
+    defer vertex_buffer.release();
+    queue.writeBuffer(vertex_buffer, 0, &vertices, @sizeOf(@TypeOf(vertices)));
+
+    const vertex_attributes = &[_]wgpu.VertexAttribute{
+        wgpu.VertexAttribute{
+            .format = .float32x2,
+            .offset = 0,
+            .shader_location = 0,
+        },
+    };
+    const vertex_buffer_layouts = &[_]wgpu.VertexBufferLayout{
+        wgpu.VertexBufferLayout{
+            .array_stride = @sizeOf([2]f32),
+            .attribute_count = vertex_attributes.len,
+            .attributes = vertex_attributes.ptr,
+        },
+    };
+
     const pipeline = device.createRenderPipeline(&wgpu.RenderPipelineDescriptor{
         .vertex = wgpu.VertexState{
             .module = shader_module,
             .entry_point = wgpu.StringView.fromSlice("vs_main"),
+            .buffer_count = vertex_buffer_layouts.len,
+            .buffers = vertex_buffer_layouts.ptr,
         },
         .primitive = wgpu.PrimitiveState{},
-        .fragment = &wgpu.FragmentState{ .module = shader_module, .entry_point = wgpu.StringView.fromSlice("fs_main"), .target_count = color_targets.len, .targets = color_targets.ptr },
+        .fragment = &wgpu.FragmentState{
+            .module = shader_module,
+            .entry_point = wgpu.StringView.fromSlice("fs_main"),
+            .target_count = color_targets.len,
+            .targets = color_targets.ptr,
+        },
         .multisample = wgpu.MultisampleState{},
     }).?;
     defer pipeline.release();
@@ -153,7 +189,8 @@ pub fn main() !void {
         }).?;
 
         render_pass.setPipeline(pipeline);
-        render_pass.draw(3, 1, 0, 0);
+        render_pass.setVertexBuffer(0, vertex_buffer, 0, vertex_buffer.getSize());
+        render_pass.draw(vertices.len, 1, 0, 0);
         render_pass.end();
 
         // The render pass has to be released after .end() or otherwise we'll crash on queue.submit
