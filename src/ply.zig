@@ -1,6 +1,13 @@
 const std = @import("std");
 const fs = std.fs;
 
+const ElementType = enum(u8) { char, uchar, short, ushort, int, uint, float, double };
+
+const Element = struct {
+    name: []u8,
+    type: ElementType,
+};
+
 pub fn loadPly(file_path: []u8) void {
     const file = try fs.cwd().openFile(file_path, .{});
     defer file.close();
@@ -25,16 +32,33 @@ pub fn loadPly(file_path: []u8) void {
             const element_cnt_str = try extractWord(buf, 2);
 
             const element_cnt = try std.fmt.parseInt(usize, element_cnt_str, 10);
-
-            for (0..element_cnt) |_| {
-                readline(&in_stream, &buf);
-                if (!strStartsWith(&buf, "property")) return error.InvalidFormat;
-                const property_type_str = try extractWord(buf, 1);
-                const property_name_str = try extractWord(buf, 2);
-                _ = property_type_str;
-                _ = property_name_str;
-            }
+            parseElements(&in_stream, element_cnt);
         }
+    }
+}
+
+fn parseElements(
+    allocator: std.mem.Allocator,
+    in_stream: *std.io.AnyReader,
+    element_cnt: usize,
+) []Element {
+    const buf: [1024]u8 = undefined;
+
+    const elem_arr = std.ArrayListUnmanaged(Element).empty;
+
+    for (0..element_cnt) |_| {
+        readline(&in_stream, &buf);
+        if (!strStartsWith(&buf, "property")) return error.InvalidFormat;
+        const property_type_str = try extractWord(buf, 1);
+        const property_name_str = try extractWord(buf, 2);
+
+        // for ()
+        std.enums.tagName(Color, my_color);
+
+        elem_arr.append(allocator, .{
+            .name = ,
+            .@"type" = 
+        });
     }
 }
 
